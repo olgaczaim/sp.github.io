@@ -1,0 +1,460 @@
+"use client";
+
+import { useMemo, useState } from "react";
+
+type TopologyMode = "shared" | "dedicated";
+type PresetKey = "lab" | "ha4" | "enterprise" | "custom";
+
+type FarmConfig = {
+  version: "se" | "2019" | "2016";
+  topology: TopologyMode;
+  users: number;
+  contentTb: number;
+  ha: boolean;
+  faultDomains: boolean;
+  dr: boolean;
+  search: boolean;
+  oos: boolean;
+  workflow: boolean;
+  wfe: number;
+  cache: number;
+  app: number;
+  searchNodes: number;
+  sql: number;
+  oosNodes: number;
+  workflowNodes: number;
+};
+
+type IconName = "brand" | "download" | "print" | "reset" | "users" | "database" | "shield" | "server" | "traffic" | "search" | "app" | "check" | "alert" | "info" | "chevron" | "code";
+
+const iconPaths: Record<IconName, React.ReactNode> = {
+  brand: <><rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/></>,
+  download: <><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></>,
+  print: <><path d="M6 9V3h12v6"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="7"/></>,
+  reset: <><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></>,
+  users: <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></>,
+  database: <><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></>,
+  shield: <><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></>,
+  server: <><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6h.01M7 17h.01"/></>,
+  traffic: <><path d="M4 17h16"/><path d="M6 17V9h12v8"/><path d="M9 9V5h6v4"/><path d="M12 2v3"/></>,
+  search: <><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></>,
+  app: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 17.5h7M17.5 14v7"/></>,
+  check: <path d="m5 12 4 4L19 6"/>,
+  alert: <><path d="M10.3 2.9 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></>,
+  info: <><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></>,
+  chevron: <path d="m9 18 6-6-6-6"/>,
+  code: <><path d="m8 9-3 3 3 3"/><path d="m16 9 3 3-3 3"/><path d="m14 5-4 14"/></>,
+};
+
+function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{iconPaths[name]}</svg>;
+}
+
+const baseConfig: FarmConfig = {
+  version: "se", topology: "shared", users: 5000, contentTb: 2, ha: true,
+  faultDomains: true, dr: false, search: true, oos: true, workflow: false,
+  wfe: 2, cache: 2, app: 2, searchNodes: 2, sql: 2, oosNodes: 2, workflowNodes: 0,
+};
+
+const presets: Record<Exclude<PresetKey, "custom">, FarmConfig> = {
+  lab: { ...baseConfig, users: 250, contentTb: .25, ha: false, faultDomains: false, oos: false, wfe: 1, cache: 1, app: 1, searchNodes: 1, sql: 1, oosNodes: 0 },
+  ha4: baseConfig,
+  enterprise: { ...baseConfig, topology: "dedicated", users: 15000, contentTb: 8, wfe: 2, cache: 2, app: 2, searchNodes: 2, sql: 2, oosNodes: 2 },
+};
+
+const presetLabels: { key: PresetKey; label: string; meta: string }[] = [
+  { key: "lab", label: "Lab", meta: "2 SP + 1 SQL" },
+  { key: "ha4", label: "4 Sunucu HA", meta: "Paylaşımlı MinRole" },
+  { key: "enterprise", label: "Kurumsal", meta: "Adanmış roller" },
+  { key: "custom", label: "Özel", meta: "Manuel tasarım" },
+];
+
+const roleMeta = {
+  wfe: { label: "Front-end", short: "WFE", icon: "traffic" as IconName, color: "blue", cpu: 8, ram: 24 },
+  cache: { label: "Distributed Cache", short: "DC", icon: "server" as IconName, color: "cyan", cpu: 8, ram: 24 },
+  app: { label: "Application", short: "APP", icon: "app" as IconName, color: "violet", cpu: 8, ram: 24 },
+  search: { label: "Search", short: "SRCH", icon: "search" as IconName, color: "teal", cpu: 12, ram: 32 },
+  sql: { label: "SQL Server", short: "SQL", icon: "database" as IconName, color: "amber", cpu: 16, ram: 64 },
+  oos: { label: "Office Online", short: "OOS", icon: "server" as IconName, color: "rose", cpu: 8, ram: 16 },
+  workflow: { label: "Workflow Manager", short: "WFM", icon: "app" as IconName, color: "slate", cpu: 8, ram: 16 },
+};
+
+function Stepper({ value, min = 0, max = 8, onChange, label }: { value: number; min?: number; max?: number; onChange: (value: number) => void; label: string }) {
+  return <div className="stepper" aria-label={`${label} sunucu adedi`}><button type="button" onClick={() => onChange(Math.max(min, value - 1))} disabled={value <= min} aria-label={`${label} azalt`}>−</button><span>{value}</span><button type="button" onClick={() => onChange(Math.min(max, value + 1))} disabled={value >= max} aria-label={`${label} artır`}>+</button></div>;
+}
+
+function Switch({ checked, onChange, label }: { checked: boolean; onChange: (value: boolean) => void; label: string }) {
+  return <button type="button" className={`switch ${checked ? "is-on" : ""}`} role="switch" aria-checked={checked} aria-label={label} onClick={() => onChange(!checked)}><span /></button>;
+}
+
+function ServerCard({ type, index, combinedWith, faultDomains }: { type: keyof typeof roleMeta; index: number; combinedWith?: keyof typeof roleMeta; faultDomains: boolean }) {
+  const meta = roleMeta[type];
+  const combined = combinedWith ? roleMeta[combinedWith] : null;
+  return <article className={`server-card server-${meta.color}`}><div className="server-icon"><Icon name={meta.icon} size={17} /></div><div className="server-copy"><strong>SP-{meta.short}-{String(index + 1).padStart(2, "0")}</strong><span>{meta.label}{combined ? ` + ${combined.label}` : ""}</span></div><span className={`zone-tag ${faultDomains ? "" : "zone-off"}`}>{faultDomains ? (index % 2 === 0 ? "FD-A" : "FD-B") : "Tek bölge"}</span></article>;
+}
+
+function NodeGroup({ title, eyebrow, children }: { title: string; eyebrow: string; children: React.ReactNode }) {
+  return <section className="node-group"><div className="node-group-title"><span>{eyebrow}</span><strong>{title}</strong></div><div className="node-list">{children}</div></section>;
+}
+
+function psQuote(value: string) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function buildSearchPowerShell(config: FarmConfig, searchServers: string[]) {
+  const versionLabel = config.version === "se" ? "SharePoint Server Subscription Edition" : `SharePoint Server ${config.version}`;
+  const topologyLabel = config.topology === "shared" ? "Paylaşımlı MinRole (Application + Search)" : "Adanmış Search MinRole";
+  const serverLines = searchServers.map((server, index) => `        ${psQuote(server)}${index < searchServers.length - 1 ? "," : ""}`);
+
+  return [
+    "#requires -Version 5.1",
+    "#requires -RunAsAdministrator",
+    "<#",
+    ".SYNOPSIS",
+    "    SharePoint Search Service Application ve yüksek erişilebilir Search topolojisi oluşturur.",
+    ".DESCRIPTION",
+    `    Farm Studio seçimi: ${versionLabel} | ${topologyLabel} | ${searchServers.length} Search düğümü.`,
+    "    Betik yeni/boş bir Search Service Application için güvenli varsayılanlar kullanır.",
+    "    Mevcut aktif topolojide bileşen bulursa canlı ortamı korumak için değişiklik yapmadan durur.",
+    ".NOTES",
+    "    1. SharePoint Management Shell'de Farm Administrator olarak çalıştırın.",
+    "    2. CONTOSO\\sp_search, SQL-LISTENER ve sunucu adlarını ortamınıza göre değiştirin.",
+    "    3. Önce -WhatIf ile çalıştırın; üretim öncesinde yedek ve geri dönüş planını doğrulayın.",
+    "    4. İndeks partition sayısını TB değerine göre değil, indekslenecek öğe sayısı ve yük testine göre belirleyin.",
+    "",
+    "    Microsoft kaynakları:",
+    "    https://learn.microsoft.com/sharepoint/search/redesign-for-specific-performance-requirements",
+    "    https://learn.microsoft.com/powershell/module/sharepointserver/new-spenterprisesearchserviceapplication",
+    "    https://learn.microsoft.com/powershell/module/sharepointserver/new-spenterprisesearchtopology",
+    "    https://learn.microsoft.com/powershell/module/sharepointserver/set-spenterprisesearchtopology",
+    "#>",
+    "",
+    "[CmdletBinding(SupportsShouldProcess = $true)]",
+    "param(",
+    "    [string]$SearchServiceApplicationName = 'Search Service Application',",
+    "    [string]$SearchServiceApplicationProxyName = 'Search Service Application Proxy',",
+    "    [string]$ApplicationPoolName = 'SharePoint Search Service App Pool',",
+    "    [string]$SearchServiceAccount = 'CONTOSO\\sp_search',",
+    "    [string]$DatabaseServer = 'SQL-LISTENER',",
+    "    [string]$DatabaseName = 'SP_Search_Service',",
+    "    [string]$IndexRoot = 'D:\\SharePointIndex',",
+    "    [string[]]$SearchServers = @(",
+    ...serverLines,
+    "    ),",
+    "    [System.Management.Automation.PSCredential]$DefaultContentAccessCredential = $null,",
+    "    [string]$ContentSourceName = 'Local SharePoint sites',",
+    "    [string[]]$ContentSourceStartAddresses = @(),",
+    "    [switch]$EnableContinuousCrawls,",
+    "    [switch]$StartFullCrawl",
+    ")",
+    "",
+    "Set-StrictMode -Version Latest",
+    "$ErrorActionPreference = 'Stop'",
+    "",
+    "function Write-Step {",
+    "    param([string]$Message)",
+    "    Write-Host ('[Farm Studio] ' + $Message) -ForegroundColor Cyan",
+    "}",
+    "",
+    "function Wait-SearchServiceInstanceOnline {",
+    "    param(",
+    "        [Parameter(Mandatory = $true)]$Instance,",
+    "        [int]$TimeoutMinutes = 10",
+    "    )",
+    "",
+    "    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)",
+    "    do {",
+    "        $current = Get-SPEnterpriseSearchServiceInstance -Identity $Instance.Id",
+    "        if ($current.Status -eq 'Online') { return $current }",
+    "        if ((Get-Date) -ge $deadline) {",
+    "            throw \"Search service instance '$($Instance.Server)' belirtilen sürede Online olmadı.\"",
+    "        }",
+    "        Start-Sleep -Seconds 10",
+    "    } while ($true)",
+    "}",
+    "",
+    "if (-not (Get-PSSnapin -Name 'Microsoft.SharePoint.PowerShell' -ErrorAction SilentlyContinue)) {",
+    "    Add-PSSnapin 'Microsoft.SharePoint.PowerShell'",
+    "}",
+    "",
+    "if ($SearchServers.Count -lt 1) { throw 'En az bir Search sunucusu belirtin.' }",
+    "if (($SearchServers | Select-Object -Unique).Count -ne $SearchServers.Count) { throw 'SearchServers listesinde yinelenen sunucu adı var.' }",
+    "if ($SearchServiceAccount -eq 'CONTOSO\\sp_search' -or $DatabaseServer -eq 'SQL-LISTENER') {",
+    "    throw 'Güvenlik durdurması: SearchServiceAccount ve DatabaseServer yer tutucularını ortamınıza göre değiştirin.'",
+    "}",
+    "",
+    "$targetDescription = \"$SearchServiceApplicationName on $($SearchServers -join ', ')\"",
+    "if (-not $PSCmdlet.ShouldProcess($targetDescription, 'Provision SharePoint Search topology')) { return }",
+    "",
+    "Write-Step 'Farm ve hesap ön kontrolleri yapılıyor'",
+    "$null = Get-SPFarm",
+    "$managedAccount = Get-SPManagedAccount | Where-Object { $_.UserName -ieq $SearchServiceAccount } | Select-Object -First 1",
+    "if ($null -eq $managedAccount) {",
+    "    throw \"$SearchServiceAccount kayıtlı bir SharePoint managed account değil. Önce Register-SPManagedAccount kullanın.\"",
+    "}",
+    "",
+    "$instanceByServer = @{}",
+    "foreach ($serverName in $SearchServers) {",
+    "    $farmServer = Get-SPServer -Identity $serverName -ErrorAction SilentlyContinue",
+    "    if ($null -eq $farmServer) { throw \"SharePoint farm içinde '$serverName' bulunamadı. NetBIOS/FQDN adını kontrol edin.\" }",
+    "",
+    "    $instance = Get-SPEnterpriseSearchServiceInstance -Identity $serverName -ErrorAction SilentlyContinue",
+    "    if ($null -eq $instance) { throw \"$serverName üzerinde SharePoint Server Search service instance bulunamadı. MinRole ve kurulum durumunu kontrol edin.\" }",
+    "",
+    "    if ($instance.Status -ne 'Online') {",
+    "        Write-Step \"Search service instance başlatılıyor: $serverName\"",
+    "        Start-SPEnterpriseSearchServiceInstance -Identity $instance -Confirm:$false | Out-Null",
+    "        $instance = Wait-SearchServiceInstanceOnline -Instance $instance",
+    "    }",
+    "    $instanceByServer[$serverName] = $instance",
+    "}",
+    "",
+    "Write-Step 'Service Application Pool hazırlanıyor'",
+    "$applicationPool = Get-SPServiceApplicationPool -Identity $ApplicationPoolName -ErrorAction SilentlyContinue",
+    "if ($null -eq $applicationPool) {",
+    "    $applicationPool = New-SPServiceApplicationPool -Name $ApplicationPoolName -Account $SearchServiceAccount",
+    "}",
+    "",
+    "Write-Step 'Search Service Application ve proxy hazırlanıyor'",
+    "$ssa = Get-SPEnterpriseSearchServiceApplication -Identity $SearchServiceApplicationName -ErrorAction SilentlyContinue",
+    "if ($null -eq $ssa) {",
+    "    $ssa = New-SPEnterpriseSearchServiceApplication -Name $SearchServiceApplicationName -ApplicationPool $applicationPool -DatabaseServer $DatabaseServer -DatabaseName $DatabaseName",
+    "}",
+    "",
+    "$ssaProxy = Get-SPEnterpriseSearchServiceApplicationProxy | Where-Object { $_.Name -eq $SearchServiceApplicationProxyName } | Select-Object -First 1",
+    "if ($null -eq $ssaProxy) {",
+    "    $ssaProxy = New-SPEnterpriseSearchServiceApplicationProxy -Name $SearchServiceApplicationProxyName -SearchApplication $ssa",
+    "}",
+    "",
+    "if ($null -ne $DefaultContentAccessCredential) {",
+    "    Write-Step 'Ayrı Default Content Access Account atanıyor'",
+    "    Set-SPEnterpriseSearchServiceApplication -Identity $ssa -DefaultContentAccessAccountName $DefaultContentAccessCredential.UserName -DefaultContentAccessAccountPassword $DefaultContentAccessCredential.Password",
+    "} else {",
+    "    Write-Warning 'Best practice: Search servis hesabından ayrı, düşük yetkili bir crawl hesabını -DefaultContentAccessCredential ile belirtin.'",
+    "}",
+    "",
+    "Write-Step 'Mevcut aktif Search topolojisi kontrol ediliyor'",
+    "$activeTopology = Get-SPEnterpriseSearchTopology -SearchApplication $ssa -Active",
+    "$activeComponents = @(Get-SPEnterpriseSearchComponent -SearchTopology $activeTopology -SearchApplication $ssa)",
+    "if ($activeComponents.Count -gt 0) {",
+    "    $activeComponents | Select-Object Name, ServerName | Format-Table -AutoSize",
+    "    throw 'Güvenlik durdurması: Aktif topolojide bileşenler var. Bu betik canlı topolojiyi otomatik değiştirmez. Ayrı bir geçiş planı hazırlayın.'",
+    "}",
+    "",
+    "# Küçük topolojide bileşenler birlikte; 3+ düğümde bulk ve real-time iş yükleri ayrılır.",
+    "if ($SearchServers.Count -le 2) {",
+    "    $bulkServers = @($SearchServers)",
+    "    $queryServers = @($SearchServers)",
+    "} else {",
+    "    $bulkCount = [int][Math]::Ceiling($SearchServers.Count / 2.0)",
+    "    $queryStart = [int][Math]::Floor($SearchServers.Count / 2.0)",
+    "    $bulkServers = @($SearchServers[0..($bulkCount - 1)])",
+    "    $queryServers = @($SearchServers[$queryStart..($SearchServers.Count - 1)])",
+    "}",
+    "$adminServers = @($SearchServers | Select-Object -First ([Math]::Min(2, $SearchServers.Count)))",
+    "$indexServers = @($queryServers | Select-Object -First ([Math]::Min(3, $queryServers.Count)))",
+    "",
+    "Write-Host \"Admin components : $($adminServers -join ', ')\" -ForegroundColor DarkCyan",
+    "Write-Host \"Bulk components  : $($bulkServers -join ', ')\" -ForegroundColor DarkCyan",
+    "Write-Host \"Query components : $($queryServers -join ', ')\" -ForegroundColor DarkCyan",
+    "Write-Host \"Index replicas   : $($indexServers -join ', ')\" -ForegroundColor DarkCyan",
+    "",
+    "$newTopology = $null",
+    "try {",
+    "    Write-Step 'Yeni pasif topoloji oluşturuluyor'",
+    "    $newTopology = New-SPEnterpriseSearchTopology -SearchApplication $ssa",
+    "",
+    "    foreach ($serverName in $adminServers) {",
+    "        New-SPEnterpriseSearchAdminComponent -SearchTopology $newTopology -SearchServiceInstance $instanceByServer[$serverName] -SearchApplication $ssa | Out-Null",
+    "    }",
+    "",
+    "    foreach ($serverName in $bulkServers) {",
+    "        $instance = $instanceByServer[$serverName]",
+    "        New-SPEnterpriseSearchCrawlComponent -SearchTopology $newTopology -SearchServiceInstance $instance -SearchApplication $ssa | Out-Null",
+    "        New-SPEnterpriseSearchContentProcessingComponent -SearchTopology $newTopology -SearchServiceInstance $instance -SearchApplication $ssa | Out-Null",
+    "        New-SPEnterpriseSearchAnalyticsProcessingComponent -SearchTopology $newTopology -SearchServiceInstance $instance -SearchApplication $ssa | Out-Null",
+    "    }",
+    "",
+    "    foreach ($serverName in $queryServers) {",
+    "        New-SPEnterpriseSearchQueryProcessingComponent -SearchTopology $newTopology -SearchServiceInstance $instanceByServer[$serverName] -SearchApplication $ssa | Out-Null",
+    "    }",
+    "",
+    "    foreach ($serverName in $indexServers) {",
+    "        New-SPEnterpriseSearchIndexComponent -SearchTopology $newTopology -SearchServiceInstance $instanceByServer[$serverName] -SearchApplication $ssa -IndexPartition 0 -RootDirectory $IndexRoot | Out-Null",
+    "    }",
+    "",
+    "    Write-Step 'Topoloji etkinleştiriliyor'",
+    "    Set-SPEnterpriseSearchTopology -Identity $newTopology -SearchApplication $ssa -Confirm:$false",
+    "} catch {",
+    "    if ($null -ne $newTopology) {",
+    "        $topologyState = (Get-SPEnterpriseSearchTopology -SearchApplication $ssa -Identity $newTopology).State",
+    "        if ($topologyState -eq 'Inactive') {",
+    "            Remove-SPEnterpriseSearchTopology -Identity $newTopology -SearchApplication $ssa -Confirm:$false -ErrorAction SilentlyContinue",
+    "        }",
+    "    }",
+    "    throw",
+    "}",
+    "",
+    "if ($ContentSourceStartAddresses.Count -gt 0) {",
+    "    Write-Step 'Local SharePoint content source yapılandırılıyor'",
+    "    $contentSource = Get-SPEnterpriseSearchCrawlContentSource -Identity $ContentSourceName -SearchApplication $ssa -ErrorAction SilentlyContinue",
+    "    if ($null -eq $contentSource) { throw \"Content source '$ContentSourceName' bulunamadı. Dil veya ad farklı olabilir.\" }",
+    "    Set-SPEnterpriseSearchCrawlContentSource -Identity $contentSource -SearchApplication $ssa -StartAddresses ($ContentSourceStartAddresses -join ',') -EnableContinuousCrawls ([bool]$EnableContinuousCrawls)",
+    "    if ($StartFullCrawl) {",
+    "        $contentSource = Get-SPEnterpriseSearchCrawlContentSource -Identity $ContentSourceName -SearchApplication $ssa",
+    "        $contentSource.StartFullCrawl()",
+    "    }",
+    "}",
+    "",
+    "Write-Step 'Aktif topoloji doğrulanıyor'",
+    "$verifiedTopology = Get-SPEnterpriseSearchTopology -SearchApplication $ssa -Active",
+    "$verifiedComponents = @(Get-SPEnterpriseSearchComponent -SearchTopology $verifiedTopology -SearchApplication $ssa)",
+    "$verifiedComponents | Select-Object Name, ServerName | Sort-Object ServerName, Name | Format-Table -AutoSize",
+    "",
+    "Write-Host \"Search topolojisi etkin. TopologyId: $($verifiedTopology.TopologyId) | Components: $($verifiedComponents.Count)\" -ForegroundColor Green",
+    "Write-Warning 'İlk crawl öncesinde crawl account izinlerini, Search DB HA durumunu, indeks disk kapasitesini ve Antivirus exclusions ayarlarını doğrulayın.'",
+    "",
+  ].join("\r\n");
+}
+
+export default function Home() {
+  const [config, setConfig] = useState<FarmConfig>(baseConfig);
+  const [activePreset, setActivePreset] = useState<PresetKey>("ha4");
+  const [notice, setNotice] = useState<{ kind: "success" | "warning"; title: string; detail: string } | null>(null);
+
+  const setField = <K extends keyof FarmConfig>(key: K, value: FarmConfig[K]) => {
+    setConfig((current) => ({ ...current, [key]: value }));
+    setActivePreset("custom");
+  };
+  const choosePreset = (key: PresetKey) => { setActivePreset(key); if (key !== "custom") setConfig({ ...presets[key] }); };
+  const applyRecommended = () => {
+    const dedicated = config.users > 10000 || config.contentTb >= 5;
+    const searchCount = config.search ? (config.ha ? (config.contentTb >= 12 ? 4 : 2) : 1) : 0;
+    const scale = config.users > 25000 ? 4 : config.ha ? 2 : 1;
+    setConfig((current) => ({ ...current, topology: dedicated ? "dedicated" : "shared", faultDomains: current.ha, wfe: scale, cache: current.ha ? 2 : 1, app: current.users > 25000 ? 4 : current.ha ? 2 : 1, searchNodes: searchCount, sql: current.ha ? 2 : 1, oosNodes: current.oos ? (current.ha ? 2 : 1) : 0, workflowNodes: current.workflow ? (current.ha ? 3 : 1) : 0 }));
+    setActivePreset("custom");
+  };
+
+  const metrics = useMemo(() => {
+    const spCount = config.topology === "shared" ? config.wfe + config.app : config.wfe + config.cache + config.app + (config.search ? config.searchNodes : 0);
+    const ancillary = (config.oos ? config.oosNodes : 0) + (config.workflow ? config.workflowNodes : 0);
+    const total = spCount + config.sql + ancillary;
+    const searchCount = config.topology === "shared" ? config.app : config.searchNodes;
+    const wfeReady = config.wfe >= (config.ha ? 2 : 1), appReady = config.app >= (config.ha ? 2 : 1), searchReady = !config.search || searchCount >= (config.ha ? 2 : 1), sqlReady = config.sql >= (config.ha ? 2 : 1), zonesReady = !config.ha || config.faultDomains;
+    const criteria = [wfeReady, appReady, searchReady, sqlReady, zonesReady];
+    const score = Math.round((criteria.filter(Boolean).length / criteria.length) * 100);
+    const roles = config.topology === "shared"
+      ? [{ count: config.wfe, cpu: 8, ram: 24 }, { count: config.app, cpu: 12, ram: 32 }]
+      : [{ count: config.wfe, ...roleMeta.wfe }, { count: config.cache, ...roleMeta.cache }, { count: config.app, ...roleMeta.app }, { count: config.search ? config.searchNodes : 0, ...roleMeta.search }];
+    const totals = roles.map(({ count, cpu, ram }) => ({ count, cpu, ram }));
+    totals.push({ count: config.sql, cpu: roleMeta.sql.cpu, ram: roleMeta.sql.ram });
+    if (config.oos) totals.push({ count: config.oosNodes, cpu: roleMeta.oos.cpu, ram: roleMeta.oos.ram });
+    if (config.workflow) totals.push({ count: config.workflowNodes, cpu: roleMeta.workflow.cpu, ram: roleMeta.workflow.ram });
+    const vcpu = totals.reduce((sum, item) => sum + item.count * item.cpu, 0), ram = totals.reduce((sum, item) => sum + item.count * item.ram, 0);
+    const findings: { level: "warning" | "info" | "ok"; title: string; detail: string }[] = [];
+    if (config.ha && !wfeReady) findings.push({ level: "warning", title: "Front-end tek hata noktası", detail: "HA hedefi için en az iki Front-end örneği kullanın." });
+    if (config.ha && !appReady) findings.push({ level: "warning", title: "Application katmanı yedeksiz", detail: "Servis uygulamaları için ikinci Application düğümü ekleyin." });
+    if (config.search && config.ha && !searchReady) findings.push({ level: "warning", title: "Search bileşenleri yedeksiz", detail: "Index, Query, Crawl ve Content Processing bileşenlerini iki hata alanına dağıtın." });
+    if (config.ha && !sqlReady) findings.push({ level: "warning", title: "Veri katmanı yedeksiz", detail: "Desteklenen veritabanları için iki SQL düğümlü senkron AG değerlendirin." });
+    if (config.ha && !config.faultDomains) findings.push({ level: "warning", title: "Hata alanı ayrımı kapalı", detail: "Yedek sunucuları farklı host, rack veya availability zone üzerinde konumlandırın." });
+    if (config.users > 10000 && config.topology === "shared") findings.push({ level: "info", title: "Adanmış roller değerlendirilebilir", detail: "Yüksek kullanıcı sayısında Search ve Distributed Cache rollerini ayırmak ölçeklemeyi kolaylaştırır." });
+    if (config.contentTb >= 5 && config.search && searchCount < 2) findings.push({ level: "info", title: "Search kapasitesini doğrulayın", detail: "İndeks boyutu, öğe sayısı ve sorgu trafiği ile ayrı yük testi planlayın." });
+    if (config.oos && config.ha && config.oosNodes < 2) findings.push({ level: "warning", title: "Office Online yedeksiz", detail: "Kesintisiz belge görüntüleme için ikinci OOS düğümü ekleyin." });
+    if (config.workflow && config.ha && config.workflowNodes < 3) findings.push({ level: "info", title: "Workflow quorum kontrolü", detail: "Workflow Manager için üç düğümlü farm ve yük dengeleme yaklaşımını doğrulayın." });
+    if (!findings.length) findings.push({ level: "ok", title: "Temel HA kontrolleri geçildi", detail: "Üretim öncesinde kapasite testi, yedek geri dönüşü ve failover senaryolarını doğrulayın." });
+    return { total, spCount, searchCount, score, vcpu, ram, findings };
+  }, [config]);
+
+  const exportDesign = () => {
+    const payload = { title: "SharePoint Farm Mimari Tasarımı", generatedAt: new Date().toISOString(), assumptions: { users: config.users, contentTb: config.contentTb, highAvailability: config.ha }, configuration: config, sizingDraft: { totalServers: metrics.total, estimatedVcpu: metrics.vcpu, estimatedRamGb: metrics.ram }, notes: metrics.findings };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a"); anchor.href = url; anchor.download = "sharepoint-farm-mimarisi.json"; anchor.click(); URL.revokeObjectURL(url);
+  };
+
+  const exportSearchPowerShell = () => {
+    if (!config.search) {
+      setNotice({ kind: "warning", title: "Search yapılandırması kapalı", detail: "Önce Hedefler ve servisler bölümünden Search Service Application seçeneğini etkinleştirin." });
+      return;
+    }
+
+    const count = config.topology === "shared" ? config.app : config.searchNodes;
+    const prefix = config.topology === "shared" ? "SP-APP" : "SP-SRCH";
+    const searchServers = Array.from({ length: count }, (_, index) => `${prefix}-${String(index + 1).padStart(2, "0")}`);
+    const script = buildSearchPowerShell(config, searchServers);
+    const blob = new Blob(["\uFEFF", script], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `configure-sharepoint-search-${config.version}-${config.topology}-${count}-nodes.ps1`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setNotice({ kind: "success", title: "PowerShell betiği indirildi", detail: `${count} Search düğümü için güvenli SSA, proxy, bileşen yerleşimi ve doğrulama adımları oluşturuldu.` });
+  };
+
+  const serverRows = config.topology === "shared"
+    ? [{ key: "wfe", label: "Front-end + Distributed Cache", value: config.wfe, set: (v: number) => setField("wfe", v), icon: "traffic" as IconName }, { key: "app", label: config.search ? "Application + Search" : "Application", value: config.app, set: (v: number) => setField("app", v), icon: "app" as IconName }]
+    : [{ key: "wfe", label: "Front-end", value: config.wfe, set: (v: number) => setField("wfe", v), icon: "traffic" as IconName }, { key: "cache", label: "Distributed Cache", value: config.cache, set: (v: number) => setField("cache", v), icon: "server" as IconName }, { key: "app", label: "Application", value: config.app, set: (v: number) => setField("app", v), icon: "app" as IconName }, ...(config.search ? [{ key: "search", label: "Search", value: config.searchNodes, set: (v: number) => setField("searchNodes", v), icon: "search" as IconName }] : [])];
+
+  return <main className="site-shell">
+    <header className="topbar">
+      <div className="brand-block"><div className="brand-mark"><Icon name="brand" size={20} /></div><div><strong>Farm Studio</strong><span>SharePoint Architecture Designer</span></div></div>
+      <div className="topbar-context"><span className="live-dot" /><span>Tasarım otomatik güncelleniyor</span></div>
+      <div className="topbar-actions"><button className="ghost-button" type="button" onClick={() => { setConfig(baseConfig); setActivePreset("ha4"); setNotice(null); }}><Icon name="reset" size={16} /><span>Sıfırla</span></button><button className="ghost-button" type="button" onClick={() => window.print()}><Icon name="print" size={16} /><span>Yazdır</span></button><button className="ghost-button" type="button" onClick={exportDesign}><Icon name="download" size={16} /><span>JSON</span></button><button className="primary-button powershell-button" type="button" onClick={exportSearchPowerShell}><Icon name="code" size={17} /><span>Search .ps1</span></button></div>
+    </header>
+
+    <section className="hero-strip"><div><p className="kicker">MİMARİ ÇALIŞMA ALANI</p><h1>SharePoint farm’ınızı<br /><span>güvenle modelleyin.</span></h1></div><p className="hero-copy">İş yükü hedeflerini belirleyin, MinRole topolojinizi kurun ve yüksek erişilebilirlik açıklarını anında görün.</p></section>
+
+    <nav className="preset-bar" aria-label="Hazır mimari şablonları"><div className="preset-heading"><span>Hızlı başlangıç</span><strong>Bir tasarım şablonu seçin</strong></div><div className="preset-list">{presetLabels.map((preset) => <button key={preset.key} type="button" className={`preset-button ${activePreset === preset.key ? "is-active" : ""}`} onClick={() => choosePreset(preset.key)}><span className="preset-radio" /><span><strong>{preset.label}</strong><small>{preset.meta}</small></span></button>)}</div></nav>
+
+    <div className="workspace-grid">
+      <aside className="panel config-panel">
+        <div className="panel-heading"><div><span>01</span><div><p>Girdiler</p><h2>Farm ayarları</h2></div></div><span className="status-pill">Düzenlenebilir</span></div>
+        <div className="control-section"><label className="field-label" htmlFor="version">SharePoint sürümü</label><div className="select-wrap"><select id="version" value={config.version} onChange={(e) => setField("version", e.target.value as FarmConfig["version"])}><option value="se">Subscription Edition</option><option value="2019">SharePoint Server 2019</option><option value="2016">SharePoint Server 2016</option></select><Icon name="chevron" size={15} /></div></div>
+        <div className="control-section compact-section"><div className="section-caption"><span>İş yükü</span><small>Başlangıç varsayımları</small></div>
+          <label className="range-field"><div><span><Icon name="users" size={16} /> Aktif kullanıcı</span><strong>{config.users.toLocaleString("tr-TR")}</strong></div><input type="range" min="250" max="50000" step="250" value={config.users} style={{ background: `linear-gradient(90deg,#2879e2 ${((config.users - 250) / 49750) * 100}%,#dfe6ee 0)` }} onChange={(e) => setField("users", Number(e.target.value))} /><small><span>250</span><span>50.000</span></small></label>
+          <label className="range-field"><div><span><Icon name="database" size={16} /> İçerik hacmi</span><strong>{config.contentTb.toLocaleString("tr-TR")} TB</strong></div><input type="range" min="0.25" max="25" step="0.25" value={config.contentTb} style={{ background: `linear-gradient(90deg,#2879e2 ${((config.contentTb - .25) / 24.75) * 100}%,#dfe6ee 0)` }} onChange={(e) => setField("contentTb", Number(e.target.value))} /><small><span>0,25 TB</span><span>25 TB</span></small></label>
+          <button type="button" className="recommend-button" onClick={applyRecommended}><span className="spark">✦</span> Bu yüke göre öner</button>
+        </div>
+        <div className="control-section compact-section"><div className="section-caption"><span>MinRole modeli</span><small>Servis yerleşimi</small></div><div className="segmented-control" role="group" aria-label="MinRole modeli"><button type="button" className={config.topology === "shared" ? "is-selected" : ""} onClick={() => setField("topology", "shared")}>Paylaşımlı</button><button type="button" className={config.topology === "dedicated" ? "is-selected" : ""} onClick={() => setField("topology", "dedicated")}>Adanmış</button></div><p className="helper-copy">{config.topology === "shared" ? "WFE + Cache ve Application + Search rolleri aynı sunucularda çalışır." : "Her MinRole işlevi bağımsız sunucu grubunda ölçeklenir."}</p></div>
+        <div className="control-section compact-section"><div className="section-caption"><span>Sunucu rolleri</span><small>1–8 düğüm</small></div><div className="role-controls">{serverRows.map((row) => <div className="role-control" key={row.key}><span className={`role-symbol role-${row.key}`}><Icon name={row.icon} size={16} /></span><span className="role-label">{row.label}</span><Stepper value={row.value} min={1} onChange={row.set} label={row.label} /></div>)}<div className="role-control"><span className="role-symbol role-sql"><Icon name="database" size={16} /></span><span className="role-label">SQL Server</span><Stepper value={config.sql} min={1} max={4} onChange={(v) => setField("sql", v)} label="SQL Server" /></div>{config.oos && <div className="role-control"><span className="role-symbol role-oos"><Icon name="server" size={16} /></span><span className="role-label">Office Online</span><Stepper value={config.oosNodes} min={1} max={4} onChange={(v) => setField("oosNodes", v)} label="Office Online" /></div>}{config.workflow && <div className="role-control"><span className="role-symbol role-workflow"><Icon name="app" size={16} /></span><span className="role-label">Workflow Manager</span><Stepper value={config.workflowNodes} min={1} max={5} onChange={(v) => setField("workflowNodes", v)} label="Workflow Manager" /></div>}</div></div>
+        <div className="control-section compact-section"><div className="section-caption"><span>Hedefler ve servisler</span><small>İsteğe bağlı</small></div><div className="switch-list">
+          <div className="switch-row"><span><strong>Yüksek erişilebilirlik</strong><small>Rol başına N+1</small></span><Switch checked={config.ha} onChange={(v) => setField("ha", v)} label="Yüksek erişilebilirlik" /></div>
+          <div className="switch-row"><span><strong>İki hata alanı</strong><small>Host / rack ayrımı</small></span><Switch checked={config.faultDomains} onChange={(v) => setField("faultDomains", v)} label="İki hata alanı" /></div>
+          <div className="switch-row"><span><strong>Search Service Application</strong><small>Kurumsal arama</small></span><Switch checked={config.search} onChange={(v) => { setField("search", v); setConfig((c) => ({ ...c, search: v, searchNodes: v ? Math.max(c.searchNodes, c.ha ? 2 : 1) : 0 })); }} label="Search Service Application" /></div>
+          <div className="switch-row"><span><strong>Office Online Server</strong><small>Tarayıcıda önizleme</small></span><Switch checked={config.oos} onChange={(v) => { setField("oos", v); setConfig((c) => ({ ...c, oos: v, oosNodes: v ? (c.ha ? 2 : 1) : 0 })); }} label="Office Online Server" /></div>
+          <div className="switch-row"><span><strong>Workflow Manager</strong><small>2013 iş akışları</small></span><Switch checked={config.workflow} onChange={(v) => { setField("workflow", v); setConfig((c) => ({ ...c, workflow: v, workflowNodes: v ? (c.ha ? 3 : 1) : 0 })); }} label="Workflow Manager" /></div>
+          <div className="switch-row"><span><strong>İkincil DR lokasyonu</strong><small>Asenkron kopya</small></span><Switch checked={config.dr} onChange={(v) => setField("dr", v)} label="İkincil DR lokasyonu" /></div>
+        </div></div>
+      </aside>
+
+      <section className="center-column">
+        <div className="summary-cards"><article><span className="summary-icon blue"><Icon name="server" size={18} /></span><div><small>Toplam sunucu</small><strong>{metrics.total}</strong></div><em>{metrics.spCount} SharePoint</em></article><article><span className="summary-icon violet"><Icon name="shield" size={18} /></span><div><small>Erişilebilirlik</small><strong>{config.ha ? "N+1" : "Standart"}</strong></div><em>{config.faultDomains ? "2 hata alanı" : "Tek hata alanı"}</em></article><article><span className="summary-icon teal"><Icon name="search" size={18} /></span><div><small>Search</small><strong>{config.search ? `${metrics.searchCount} düğüm` : "Kapalı"}</strong></div><em>{config.search && metrics.searchCount >= 2 ? "Yedekli" : "Tekil"}</em></article></div>
+        <section className="architecture-card"><div className="architecture-toolbar"><div><span>02</span><div><p>Canlı topoloji</p><h2>Farm mimarisi</h2></div></div><div className="toolbar-badges"><span>{config.version === "se" ? "Subscription Edition" : `Server ${config.version}`}</span><span>{config.topology === "shared" ? "Paylaşımlı MinRole" : "Adanmış MinRole"}</span></div></div>
+          <div className="blueprint"><div className="blueprint-grid" />
+            <div className="flow-stage edge-stage"><div className="stage-label"><span>01</span><p>İSTEMCİ &amp; ERİŞİM</p></div><div className="edge-flow"><div className="client-cloud"><Icon name="users" size={18} /><span><strong>{config.users.toLocaleString("tr-TR")}</strong><small>aktif kullanıcı</small></span></div><div className="flow-arrow"><i /><span>HTTPS</span><b>›</b></div><div className="load-balancer"><Icon name="traffic" size={18} /><span><strong>Yük Dengeleyici</strong><small>{config.ha ? "Aktif / pasif VIP" : "Tek VIP"}</small></span><em>{config.ha ? "2×" : "1×"}</em></div></div></div>
+            <div className="vertical-connector"><span /></div>
+            <div className="flow-stage farm-stage"><div className="stage-label"><span>02</span><p>SHAREPOINT FARM</p></div><div className="farm-meta"><span className="farm-health-dot" /><strong>Farm çevrimiçi</strong><small>{config.faultDomains ? "FD-A + FD-B" : "Tek hata alanı"}</small></div><div className={`farm-groups ${config.topology}`}>
+              {config.topology === "shared" ? <><NodeGroup eyebrow="WEB KATMANI" title="Front-end + Cache">{Array.from({ length: config.wfe }).map((_, index) => <ServerCard key={`wfe-${index}`} type="wfe" combinedWith="cache" index={index} faultDomains={config.faultDomains} />)}</NodeGroup><NodeGroup eyebrow="SERVİS KATMANI" title={config.search ? "Application + Search" : "Application"}>{Array.from({ length: config.app }).map((_, index) => <ServerCard key={`app-${index}`} type="app" combinedWith={config.search ? "search" : undefined} index={index} faultDomains={config.faultDomains} />)}</NodeGroup></> : <><NodeGroup eyebrow="WEB" title="Front-end">{Array.from({ length: config.wfe }).map((_, index) => <ServerCard key={`wfe-${index}`} type="wfe" index={index} faultDomains={config.faultDomains} />)}</NodeGroup><NodeGroup eyebrow="CACHE" title="Distributed Cache">{Array.from({ length: config.cache }).map((_, index) => <ServerCard key={`cache-${index}`} type="cache" index={index} faultDomains={config.faultDomains} />)}</NodeGroup><NodeGroup eyebrow="SERVİS" title="Application">{Array.from({ length: config.app }).map((_, index) => <ServerCard key={`app-${index}`} type="app" index={index} faultDomains={config.faultDomains} />)}</NodeGroup>{config.search && <NodeGroup eyebrow="ARAMA" title="Search">{Array.from({ length: config.searchNodes }).map((_, index) => <ServerCard key={`search-${index}`} type="search" index={index} faultDomains={config.faultDomains} />)}</NodeGroup>}</>}
+            </div></div>
+            <div className="vertical-connector split"><span /></div>
+            <div className="lower-tier-grid"><div className="flow-stage data-stage"><div className="stage-label"><span>03</span><p>VERİ KATMANI</p></div><div className="data-content"><div className="sql-cluster">{Array.from({ length: config.sql }).map((_, index) => <div className="sql-node" key={`sql-${index}`}><span className="sql-cylinder"><Icon name="database" size={18} /></span><span><strong>SQL-{String(index + 1).padStart(2, "0")}</strong><small>{index === 0 ? "Primary replica" : "Synchronous replica"}</small></span><em>{config.faultDomains ? (index % 2 === 0 ? "FD-A" : "FD-B") : "LOCAL"}</em></div>)}</div><div className="ag-label"><span className={config.sql >= 2 ? "ready" : ""}><Icon name={config.sql >= 2 ? "check" : "alert"} size={13} /></span><div><strong>{config.sql >= 2 ? "Always On AG" : "Tek SQL örneği"}</strong><small>{config.sql >= 2 ? "Senkron commit + listener" : "Üretim HA için yedek ekleyin"}</small></div></div></div></div>
+              <div className="flow-stage services-stage"><div className="stage-label"><span>04</span><p>BAĞLI SERVİSLER</p></div><div className="service-chips">{config.oos && <div><span className="service-chip-icon rose"><Icon name="server" size={16} /></span><span><strong>Office Online</strong><small>{config.oosNodes} düğüm</small></span></div>}{config.workflow && <div><span className="service-chip-icon slate"><Icon name="app" size={16} /></span><span><strong>Workflow Manager</strong><small>{config.workflowNodes} düğüm</small></span></div>}{config.dr && <div><span className="service-chip-icon blue"><Icon name="shield" size={16} /></span><span><strong>DR lokasyonu</strong><small>Asenkron kopya</small></span></div>}{!config.oos && !config.workflow && !config.dr && <div className="empty-services"><Icon name="info" size={16} /><span>Bağlı servis seçilmedi</span></div>}</div></div>
+            </div>
+          </div>
+        </section>
+        <div className="assumption-note"><Icon name="info" size={17} /><p><strong>Taslak sizing:</strong> Kaynak değerleri başlangıç varsayımıdır. Nihai CPU, bellek, disk IOPS ve Search topolojisi ölçülen kullanım, içerik öğesi sayısı ve performans testiyle doğrulanmalıdır.</p></div>
+      </section>
+
+      <aside className="panel analysis-panel"><div className="panel-heading"><div><span>03</span><div><p>Analiz</p><h2>Mimari kontrolü</h2></div></div><span className={`status-pill ${metrics.score === 100 ? "success" : "attention"}`}>{metrics.score === 100 ? "Hazır" : "İnceleyin"}</span></div>
+        <section className="score-section"><div className="score-ring" style={{ "--score": `${metrics.score * 3.6}deg` } as React.CSSProperties}><div><strong>{metrics.score}</strong><span>/ 100</span></div></div><div className="score-copy"><span>Mimari sağlık skoru</span><strong>{metrics.score === 100 ? "Temel kontroller tamam" : metrics.score >= 60 ? "İyi, birkaç açık var" : "Kritik açıklar var"}</strong><small>HA, rol yedekliliği ve hata alanı bazında</small></div></section>
+        <section className="analysis-section"><div className="section-caption"><span>Kontrol bulguları</span><small>{metrics.findings.length} madde</small></div><div className="finding-list">{metrics.findings.map((finding, index) => <article key={`${finding.title}-${index}`} className={`finding ${finding.level}`}><span><Icon name={finding.level === "warning" ? "alert" : finding.level === "ok" ? "check" : "info"} size={15} /></span><div><strong>{finding.title}</strong><p>{finding.detail}</p></div></article>)}</div></section>
+        <section className="analysis-section sizing-section"><div className="section-caption"><span>Kaynak özeti</span><small>Taslak sizing</small></div><div className="sizing-grid"><div><span>Sunucu</span><strong>{metrics.total}</strong><small>toplam düğüm</small></div><div><span>vCPU</span><strong>{metrics.vcpu}</strong><small>tahmini toplam</small></div><div><span>Bellek</span><strong>{metrics.ram}</strong><small>GB RAM</small></div><div><span>İçerik</span><strong>{config.contentTb}</strong><small>TB veri</small></div></div></section>
+        <section className="analysis-section decision-section"><div className="section-caption"><span>Karar özeti</span><small>Mevcut seçim</small></div><dl><div><dt>Sürüm</dt><dd>{config.version === "se" ? "Subscription Edition" : `Server ${config.version}`}</dd></div><div><dt>Topoloji</dt><dd>{config.topology === "shared" ? "Paylaşımlı MinRole" : "Adanmış MinRole"}</dd></div><div><dt>HA hedefi</dt><dd>{config.ha ? "Etkin" : "Etkin değil"}</dd></div><div><dt>Hata alanı</dt><dd>{config.faultDomains ? "2 bölge" : "Tek bölge"}</dd></div><div><dt>DR</dt><dd>{config.dr ? "Planlandı" : "Kapsam dışı"}</dd></div></dl></section>
+        <section className={`ps-export-card ${config.search ? "" : "is-disabled"}`}><span><Icon name="code" size={18} /></span><div><div className="ps-card-heading"><strong>Search PowerShell</strong><em>{config.search ? `${metrics.searchCount} düğüm` : "Devre dışı"}</em></div><p>Seçili topoloji için güvenli ön kontroller, SSA/proxy, Search bileşenleri ve doğrulama adımlarını `.ps1` olarak üretir.</p><button type="button" onClick={exportSearchPowerShell} disabled={!config.search}><Icon name="download" size={14} /> Betiği indir</button></div></section>
+        <section className="sources-card"><span><Icon name="shield" size={17} /></span><div><strong>Microsoft rehberleriyle hizalı</strong><p>MinRole, yüksek erişilebilirlik ve Search yedekliliği kontrolleri resmi planlama ilkelerini temel alır.</p><a href="https://learn.microsoft.com/sharepoint/install/planning-for-a-minrole-server-deployment-in-sharepoint-server" target="_blank" rel="noreferrer">Planlama rehberini aç <Icon name="chevron" size={13} /></a></div></section>
+      </aside>
+    </div>
+    {notice && <div className={`toast-notice ${notice.kind}`} role="status" aria-live="polite"><span><Icon name={notice.kind === "success" ? "check" : "alert"} size={17} /></span><div><strong>{notice.title}</strong><p>{notice.detail}</p></div><button type="button" onClick={() => setNotice(null)} aria-label="Bildirimi kapat">×</button></div>}
+    <footer><span>Farm Studio · SharePoint Server mimari çalışma alanı</span><nav><a href="https://learn.microsoft.com/sharepoint/administration/plan-for-high-availability" target="_blank" rel="noreferrer">HA rehberi</a><a href="https://learn.microsoft.com/sharepoint/search/redesign-for-specific-performance-requirements" target="_blank" rel="noreferrer">Search rehberi</a><a href="https://learn.microsoft.com/sharepoint/administration/configure-an-alwayson-availability-group" target="_blank" rel="noreferrer">SQL Always On</a></nav></footer>
+  </main>;
+}
