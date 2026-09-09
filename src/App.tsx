@@ -4,12 +4,17 @@ import { useMemo, useState } from "react";
 
 type TopologyMode = "shared" | "dedicated";
 type PresetKey = "lab" | "ha4" | "enterprise" | "custom";
+type IndexPartitionMode = "auto" | "manual";
 
 type FarmConfig = {
   version: "se" | "2019" | "2016";
   topology: TopologyMode;
   users: number;
   contentTb: number;
+  expectedIndexedItemsMillions: number;
+  indexPartitionMode: IndexPartitionMode;
+  indexPartitions: number;
+  indexReplicas: number;
   ha: boolean;
   faultDomains: boolean;
   dr: boolean;
@@ -52,14 +57,15 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
 
 const baseConfig: FarmConfig = {
   version: "se", topology: "shared", users: 5000, contentTb: 2, ha: true,
+  expectedIndexedItemsMillions: 5, indexPartitionMode: "auto", indexPartitions: 1, indexReplicas: 2,
   faultDomains: true, dr: false, search: true, oos: true, workflow: false,
   wfe: 2, cache: 2, app: 2, searchNodes: 2, sql: 2, oosNodes: 2, workflowNodes: 0,
 };
 
 const presets: Record<Exclude<PresetKey, "custom">, FarmConfig> = {
-  lab: { ...baseConfig, users: 250, contentTb: .25, ha: false, faultDomains: false, oos: false, wfe: 1, cache: 1, app: 1, searchNodes: 1, sql: 1, oosNodes: 0 },
+  lab: { ...baseConfig, users: 250, contentTb: .25, expectedIndexedItemsMillions: .5, indexReplicas: 1, ha: false, faultDomains: false, oos: false, wfe: 1, cache: 1, app: 1, searchNodes: 1, sql: 1, oosNodes: 0 },
   ha4: baseConfig,
-  enterprise: { ...baseConfig, topology: "dedicated", users: 15000, contentTb: 8, wfe: 2, cache: 2, app: 2, searchNodes: 2, sql: 2, oosNodes: 2 },
+  enterprise: { ...baseConfig, topology: "dedicated", users: 15000, contentTb: 8, expectedIndexedItemsMillions: 40, indexPartitions: 2, wfe: 2, cache: 2, app: 2, searchNodes: 2, sql: 2, oosNodes: 2 },
 };
 
 const presetLabels: { key: PresetKey; label: string; meta: string }[] = [
@@ -90,7 +96,7 @@ function Switch({ checked, onChange, label }: { checked: boolean; onChange: (val
 function ServerCard({ type, index, combinedWith, faultDomains }: { type: keyof typeof roleMeta; index: number; combinedWith?: keyof typeof roleMeta; faultDomains: boolean }) {
   const meta = roleMeta[type];
   const combined = combinedWith ? roleMeta[combinedWith] : null;
-  return <article className={`server-card server-${meta.color}`}><div className="server-icon"><Icon name={meta.icon} size={17} /></div><div className="server-copy"><strong>SP-{meta.short}-{String(index + 1).padStart(2, "0")}</strong><span>{meta.label}{combined ? ` + ${combined.label}` : ""}</span></div><span className={`zone-tag ${faultDomains ? "" : "zone-off"}`}>{faultDomains ? (index % 2 === 0 ? "FD-A" : "FD-B") : "Single domain"}</span></article>;
+  return <article className={`server-card server-${meta.color}`}><div className="server-icon"><Icon name={meta.icon} size={17} /></div><div className="server-copy"><strong>SP-{meta.short}-{String(index + 1).padStart(2, "0")}</strong><span>{meta.label}{combined ? ` + ${combined.label}` : ""}</span></div><span className={`zone-tag ${faultDomains ? "" : "zone-off"}`} title="Infrastructure planning label only; SharePoint does not configure or track this value.">{faultDomains ? (index % 2 === 0 ? "Failure group 1" : "Failure group 2") : "Single group"}</span></article>;
 }
 
 function NodeGroup({ title, eyebrow, children }: { title: string; eyebrow: string; children: React.ReactNode }) {
@@ -101,9 +107,47 @@ function psQuote(value: string) {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-function buildSearchPowerShell(config: FarmConfig, searchServers: string[]) {
+const INDEX_ITEMS_PER_PARTITION_MILLIONS = 20;
+const MAX_INDEX_PARTITIONS = 25;
+const MAX_INDEX_REPLICAS = 3;
+const MAX_INDEX_COMPONENTS = 60;
+const MAX_INDEX_COMPONENTS_PER_SERVER = 4;
+const MAX_NON_CRAWL_SEARCH_COMPONENTS = 64;
+
+function recommendedIndexPartitions(expectedIndexedItemsMillions: number) {
+  return Math.max(1, Math.ceil(expectedIndexedItemsMillions / INDEX_ITEMS_PER_PARTITION_MILLIONS));
+}
+
+function selectedIndexPartitions(config: FarmConfig) {
+  return config.indexPartitionMode === "auto"
+    ? recommendedIndexPartitions(config.expectedIndexedItemsMillions)
+    : config.indexPartitions;
+}
+
+function searchPlacementCounts(searchServerCount: number) {
+  if (searchServerCount <= 2) {
+    return { bulkCount: searchServerCount, queryCount: searchServerCount, adminCount: Math.min(2, searchServerCount) };
+  }
+
+  return {
+    bulkCount: Math.ceil(searchServerCount / 2),
+    queryCount: Math.ceil(searchServerCount / 2),
+    adminCount: Math.min(2, searchServerCount),
+  };
+}
+
+function recommendedSearchServerCount(partitions: number, replicas: number, highAvailability: boolean) {
+  const requiredIndexHosts = Math.max(replicas, Math.ceil((partitions * replicas) / MAX_INDEX_COMPONENTS_PER_SERVER));
+  const minimumServers = highAvailability ? 2 : 1;
+  return Math.min(16, Math.max(minimumServers, requiredIndexHosts <= 2 ? requiredIndexHosts : (requiredIndexHosts * 2) - 1));
+}
+
+export function buildSearchPowerShell(config: FarmConfig, searchServers: string[]) {
   const versionLabel = config.version === "se" ? "SharePoint Server Subscription Edition" : `SharePoint Server ${config.version}`;
   const topologyLabel = config.topology === "shared" ? "Shared MinRole (Application + Search)" : "Dedicated Search MinRole";
+  const partitionCount = selectedIndexPartitions(config);
+  const replicaCount = config.indexReplicas;
+  const indexComponentCount = partitionCount * replicaCount;
   const serverLines = searchServers.map((server, index) => `        ${psQuote(server)}${index < searchServers.length - 1 ? "," : ""}`);
 
   return [
@@ -114,13 +158,17 @@ function buildSearchPowerShell(config: FarmConfig, searchServers: string[]) {
     "    Creates a SharePoint Search Service Application and a highly available Search topology.",
     ".DESCRIPTION",
     `    Farm Studio selection: ${versionLabel} | ${topologyLabel} | ${searchServers.length} Search node(s).`,
+    `    Index design: ${config.expectedIndexedItemsMillions} million expected items | ${partitionCount} partition(s) | ${replicaCount} replica(s) per partition | ${indexComponentCount} index component(s).`,
     "    The script uses safe defaults for a new or empty Search Service Application.",
     "    If components already exist in the active topology, it stops without making changes to protect the live environment.",
     ".NOTES",
     "    1. Run in SharePoint Management Shell as a Farm Administrator.",
     "    2. Replace CONTOSO\\sp_search, SQL-LISTENER, and the server names for your environment.",
     "    3. Run with -WhatIf first; verify backup and rollback plans before production use.",
-    "    4. Size index partitions by indexed item count and load testing, not by content TB alone.",
+    "    4. The planning baseline is one partition per 20 million indexed items with the recommended index-server resources.",
+    "    5. SharePoint Server 2016 with less than 500 GB index storage, 32 GB RAM, or eight CPU cores should use 10 million items per partition.",
+    "    6. The script places replicas of the same partition on distinct Search servers.",
+    "    7. SharePoint does not configure or track fault-domain labels. For high availability, deploy redundant Search servers on separate physical hosts, racks, storage or power failure groups, or availability zones, and verify that placement with the infrastructure team.",
     "",
     "    Microsoft references:",
     "    https://learn.microsoft.com/sharepoint/search/redesign-for-specific-performance-requirements",
@@ -141,6 +189,12 @@ function buildSearchPowerShell(config: FarmConfig, searchServers: string[]) {
     "    [string[]]$SearchServers = @(",
     ...serverLines,
     "    ),",
+    "    [ValidateRange(0.5, 500)]",
+    `    [double]$ExpectedIndexedItemsMillions = ${config.expectedIndexedItemsMillions},`,
+    `    [ValidateRange(1, ${MAX_INDEX_PARTITIONS})]`,
+    `    [int]$IndexPartitionCount = ${partitionCount},`,
+    `    [ValidateRange(1, ${MAX_INDEX_REPLICAS})]`,
+    `    [int]$IndexReplicasPerPartition = ${replicaCount},`,
     "    [System.Management.Automation.PSCredential]$DefaultContentAccessCredential = $null,",
     "    [string]$ContentSourceName = 'Local SharePoint sites',",
     "    [string[]]$ContentSourceStartAddresses = @(),",
@@ -179,6 +233,12 @@ function buildSearchPowerShell(config: FarmConfig, searchServers: string[]) {
     "",
     "if ($SearchServers.Count -lt 1) { throw 'Specify at least one Search server.' }",
     "if (($SearchServers | Select-Object -Unique).Count -ne $SearchServers.Count) { throw 'The SearchServers list contains duplicate server names.' }",
+    "$recommendedPartitionCount = [int][Math]::Ceiling($ExpectedIndexedItemsMillions / 20.0)",
+    "if ($IndexPartitionCount -lt $recommendedPartitionCount) {",
+    "    Write-Warning \"The selected $IndexPartitionCount partition(s) are below the planning baseline of $recommendedPartitionCount for $ExpectedIndexedItemsMillions million expected items. Validate this override with load testing.\"",
+    "}",
+    "$requiredIndexComponents = $IndexPartitionCount * $IndexReplicasPerPartition",
+    `if ($requiredIndexComponents -gt ${MAX_INDEX_COMPONENTS}) { throw "The design requires $requiredIndexComponents index components; the supported limit is ${MAX_INDEX_COMPONENTS} per Search Service Application." }`,
     "if ($SearchServiceAccount -eq 'CONTOSO\\sp_search' -or $DatabaseServer -eq 'SQL-LISTENER') {",
     "    throw 'Safety stop: replace the SearchServiceAccount and DatabaseServer placeholders for your environment.'",
     "}",
@@ -194,6 +254,7 @@ function buildSearchPowerShell(config: FarmConfig, searchServers: string[]) {
     "}",
     "",
     "$instanceByServer = @{}",
+    "",
     "foreach ($serverName in $SearchServers) {",
     "    $farmServer = Get-SPServer -Identity $serverName -ErrorAction SilentlyContinue",
     "    if ($null -eq $farmServer) { throw \"Server '$serverName' was not found in the SharePoint farm. Check its NetBIOS or FQDN name.\" }",
@@ -252,12 +313,20 @@ function buildSearchPowerShell(config: FarmConfig, searchServers: string[]) {
     "    $queryServers = @($SearchServers[$queryStart..($SearchServers.Count - 1)])",
     "}",
     "$adminServers = @($SearchServers | Select-Object -First ([Math]::Min(2, $SearchServers.Count)))",
-    "$indexServers = @($queryServers | Select-Object -First ([Math]::Min(3, $queryServers.Count)))",
-    "",
+    "$indexServers = @($queryServers)",
+    "if ($IndexReplicasPerPartition -gt $indexServers.Count) {",
+    "    throw \"$IndexReplicasPerPartition replicas per partition require at least $IndexReplicasPerPartition distinct index hosts; only $($indexServers.Count) real-time Search host(s) are selected.\"",
+    "}",
+    `if ($requiredIndexComponents -gt ($indexServers.Count * ${MAX_INDEX_COMPONENTS_PER_SERVER})) {`,
+    `    throw "The design requires $requiredIndexComponents index components, but $($indexServers.Count) real-time Search host(s) support at most ${MAX_INDEX_COMPONENTS_PER_SERVER} each. Add Search servers or reduce partitions/replicas."`,
+    "}",
+    "$nonCrawlSearchComponents = $adminServers.Count + (2 * $bulkServers.Count) + $queryServers.Count + $requiredIndexComponents",
+    `if ($nonCrawlSearchComponents -gt ${MAX_NON_CRAWL_SEARCH_COMPONENTS}) { throw "The generated topology contains $nonCrawlSearchComponents non-crawl Search components; the supported limit is ${MAX_NON_CRAWL_SEARCH_COMPONENTS} per Search Service Application." }`,
     "Write-Host \"Admin components : $($adminServers -join ', ')\" -ForegroundColor DarkCyan",
     "Write-Host \"Bulk components  : $($bulkServers -join ', ')\" -ForegroundColor DarkCyan",
     "Write-Host \"Query components : $($queryServers -join ', ')\" -ForegroundColor DarkCyan",
-    "Write-Host \"Index replicas   : $($indexServers -join ', ')\" -ForegroundColor DarkCyan",
+    "Write-Host \"Index design     : $IndexPartitionCount partition(s) x $IndexReplicasPerPartition replica(s) = $requiredIndexComponents component(s)\" -ForegroundColor DarkCyan",
+    "Write-Host \"Index hosts      : $($indexServers -join ', ')\" -ForegroundColor DarkCyan",
     "",
     "$newTopology = $null",
     "try {",
@@ -279,8 +348,21 @@ function buildSearchPowerShell(config: FarmConfig, searchServers: string[]) {
     "        New-SPEnterpriseSearchQueryProcessingComponent -SearchTopology $newTopology -SearchServiceInstance $instanceByServer[$serverName] -SearchApplication $ssa | Out-Null",
     "    }",
     "",
-    "    foreach ($serverName in $indexServers) {",
-    "        New-SPEnterpriseSearchIndexComponent -SearchTopology $newTopology -SearchServiceInstance $instanceByServer[$serverName] -SearchApplication $ssa -IndexPartition 0 -RootDirectory $IndexRoot | Out-Null",
+    "    $indexAssignments = @{}",
+    "    foreach ($serverName in $indexServers) { $indexAssignments[$serverName] = 0 }",
+    "",
+    "    for ($partition = 0; $partition -lt $IndexPartitionCount; $partition++) {",
+    "        $partitionServers = @()",
+    "        for ($replica = 0; $replica -lt $IndexReplicasPerPartition; $replica++) {",
+    `            $availableCandidates = @($indexServers | Where-Object { $partitionServers -notcontains $_ -and $indexAssignments[$_] -lt ${MAX_INDEX_COMPONENTS_PER_SERVER} })`,
+    "            if ($availableCandidates.Count -eq 0) { throw \"No valid index host remains for partition $partition replica $replica.\" }",
+    "",
+    "            $serverName = $availableCandidates | Sort-Object @{ Expression = { $indexAssignments[$_] } }, @{ Expression = { [Array]::IndexOf($indexServers, $_) } } | Select-Object -First 1",
+    "            New-SPEnterpriseSearchIndexComponent -SearchTopology $newTopology -SearchServiceInstance $instanceByServer[$serverName] -SearchApplication $ssa -IndexPartition $partition -RootDirectory $IndexRoot | Out-Null",
+    "            $indexAssignments[$serverName]++",
+    "            $partitionServers += $serverName",
+    "            Write-Host \"Index partition $partition replica $($replica + 1) -> $serverName\" -ForegroundColor Gray",
+    "        }",
     "    }",
     "",
     "    Write-Step 'Activating the topology'",
@@ -312,6 +394,7 @@ function buildSearchPowerShell(config: FarmConfig, searchServers: string[]) {
     "$verifiedComponents | Select-Object Name, ServerName | Sort-Object ServerName, Name | Format-Table -AutoSize",
     "",
     "Write-Host \"Search topology is active. TopologyId: $($verifiedTopology.TopologyId) | Components: $($verifiedComponents.Count)\" -ForegroundColor Green",
+    "Write-Warning 'Infrastructure check: SharePoint does not track fault domains. Verify that redundant Search servers are placed on separate physical hosts, racks, storage or power failure groups, or availability zones.'",
     "Write-Warning 'Before the first crawl, verify crawl account permissions, Search database HA, index disk capacity, and antivirus exclusions.'",
     "",
   ].join("\r\n");
@@ -328,10 +411,26 @@ export default function Home() {
   };
   const choosePreset = (key: PresetKey) => { setActivePreset(key); if (key !== "custom") setConfig({ ...presets[key] }); };
   const applyRecommended = () => {
-    const dedicated = config.users > 10000 || config.contentTb >= 5;
-    const searchCount = config.search ? (config.ha ? (config.contentTb >= 12 ? 4 : 2) : 1) : 0;
+    const recommendedPartitions = recommendedIndexPartitions(config.expectedIndexedItemsMillions);
+    const recommendedReplicas = config.ha ? 2 : 1;
+    const dedicated = config.users > 10000 || config.contentTb >= 5 || config.expectedIndexedItemsMillions > INDEX_ITEMS_PER_PARTITION_MILLIONS;
+    const searchCount = config.search ? recommendedSearchServerCount(recommendedPartitions, recommendedReplicas, config.ha) : 0;
     const scale = config.users > 25000 ? 4 : config.ha ? 2 : 1;
-    setConfig((current) => ({ ...current, topology: dedicated ? "dedicated" : "shared", faultDomains: current.ha, wfe: scale, cache: current.ha ? 2 : 1, app: current.users > 25000 ? 4 : current.ha ? 2 : 1, searchNodes: searchCount, sql: current.ha ? 2 : 1, oosNodes: current.oos ? (current.ha ? 2 : 1) : 0, workflowNodes: current.workflow ? (current.ha ? 3 : 1) : 0 }));
+    setConfig((current) => ({
+      ...current,
+      topology: dedicated ? "dedicated" : "shared",
+      faultDomains: current.ha,
+      indexPartitionMode: "auto",
+      indexPartitions: recommendedPartitions,
+      indexReplicas: recommendedReplicas,
+      wfe: scale,
+      cache: current.ha ? 2 : 1,
+      app: dedicated ? (current.users > 25000 ? 4 : current.ha ? 2 : 1) : Math.max(current.users > 25000 ? 4 : current.ha ? 2 : 1, searchCount),
+      searchNodes: searchCount,
+      sql: current.ha ? 2 : 1,
+      oosNodes: current.oos ? (current.ha ? 2 : 1) : 0,
+      workflowNodes: current.workflow ? (current.ha ? 3 : 1) : 0,
+    }));
     setActivePreset("custom");
   };
 
@@ -339,9 +438,26 @@ export default function Home() {
     const spCount = config.topology === "shared" ? config.wfe + config.app : config.wfe + config.cache + config.app + (config.search ? config.searchNodes : 0);
     const ancillary = (config.oos ? config.oosNodes : 0) + (config.workflow ? config.workflowNodes : 0);
     const total = spCount + config.sql + ancillary;
-    const searchCount = config.topology === "shared" ? config.app : config.searchNodes;
+    const searchCount = config.search ? (config.topology === "shared" ? config.app : config.searchNodes) : 0;
+    const recommendedPartitionCount = recommendedIndexPartitions(config.expectedIndexedItemsMillions);
+    const indexPartitionCount = selectedIndexPartitions(config);
+    const indexReplicaCount = config.indexReplicas;
+    const indexComponentCount = indexPartitionCount * indexReplicaCount;
+    const placement = searchPlacementCounts(searchCount);
+    const indexHostCount = placement.queryCount;
+    const indexHostSlotCount = indexHostCount * MAX_INDEX_COMPONENTS_PER_SERVER;
+    const partitionSizingReady = !config.search || indexPartitionCount >= recommendedPartitionCount;
+    const replicaHostReady = !config.search || indexReplicaCount <= indexHostCount;
+    const indexComponentLimitReady = !config.search || indexComponentCount <= MAX_INDEX_COMPONENTS;
+    const indexHostCapacityReady = !config.search || indexComponentCount <= indexHostSlotCount;
+    const nonCrawlSearchComponentCount = placement.adminCount + (2 * placement.bulkCount) + placement.queryCount + indexComponentCount;
+    const overallSearchComponentLimitReady = !config.search || nonCrawlSearchComponentCount <= MAX_NON_CRAWL_SEARCH_COMPONENTS;
+    const replicaFaultDomainsReady = !config.search || indexReplicaCount === 1 || (config.faultDomains && indexHostCount >= 2);
+    const indexCapacityReady = replicaHostReady && indexComponentLimitReady && indexHostCapacityReady && overallSearchComponentLimitReady;
+    const indexRedundancyReady = !config.search || !config.ha || indexReplicaCount >= 2;
+    const searchExportReady = config.search && indexCapacityReady;
     const wfeReady = config.wfe >= (config.ha ? 2 : 1), appReady = config.app >= (config.ha ? 2 : 1), searchReady = !config.search || searchCount >= (config.ha ? 2 : 1), sqlReady = config.sql >= (config.ha ? 2 : 1), zonesReady = !config.ha || config.faultDomains;
-    const criteria = [wfeReady, appReady, searchReady, sqlReady, zonesReady];
+    const criteria = [wfeReady, appReady, searchReady, sqlReady, zonesReady, partitionSizingReady, indexCapacityReady, indexRedundancyReady];
     const score = Math.round((criteria.filter(Boolean).length / criteria.length) * 100);
     const roles = config.topology === "shared"
       ? [{ count: config.wfe, cpu: 8, ram: 24 }, { count: config.app, cpu: 12, ram: 32 }]
@@ -357,16 +473,33 @@ export default function Home() {
     if (config.search && config.ha && !searchReady) findings.push({ level: "warning", title: "Search components have no redundancy", detail: "Distribute Index, Query, Crawl, and Content Processing components across two fault domains." });
     if (config.ha && !sqlReady) findings.push({ level: "warning", title: "Data tier has no redundancy", detail: "Consider a synchronous two-node SQL availability group for supported databases." });
     if (config.ha && !config.faultDomains) findings.push({ level: "warning", title: "Fault-domain separation is disabled", detail: "Place redundant servers on separate hosts, racks, or availability zones." });
+    if (config.search && !partitionSizingReady) findings.push({ level: "warning", title: "Partition override is below the sizing baseline", detail: `${recommendedPartitionCount} partitions are recommended for ${config.expectedIndexedItemsMillions.toLocaleString("en-US")} million expected indexed items. Validate the manual override with load testing.` });
+    if (config.search && !indexCapacityReady) findings.push({ level: "warning", title: "Search index placement exceeds capacity", detail: `${indexPartitionCount} partitions × ${indexReplicaCount} replicas require ${indexComponentCount} index components. The selected ${indexHostCount} real-time Search host${indexHostCount === 1 ? "" : "s"} provide ${indexHostSlotCount} component slots, subject to the farm-wide Search limits.` });
+    if (config.search && indexReplicaCount > 1 && !replicaFaultDomainsReady) findings.push({ level: "warning", title: "Index replicas are not fault-domain ready", detail: "Enable two fault domains and provide at least two real-time Search hosts so each partition can keep redundant replicas on separate hosts." });
+    if (config.search && config.ha && !indexRedundancyReady) findings.push({ level: "warning", title: "Index partitions have no redundant replica", detail: "Use at least two replicas per index partition for the selected high-availability target." });
     if (config.users > 10000 && config.topology === "shared") findings.push({ level: "info", title: "Consider dedicated roles", detail: "Separating Search and Distributed Cache roles makes scaling easier for larger user populations." });
     if (config.contentTb >= 5 && config.search && searchCount < 2) findings.push({ level: "info", title: "Validate Search capacity", detail: "Plan a dedicated load test using index size, item count, and query traffic." });
     if (config.oos && config.ha && config.oosNodes < 2) findings.push({ level: "warning", title: "Office Online has no redundancy", detail: "Add a second OOS node for resilient browser-based document viewing." });
     if (config.workflow && config.ha && config.workflowNodes < 3) findings.push({ level: "info", title: "Validate Workflow quorum", detail: "Validate a three-node Workflow Manager farm and load-balancing approach." });
     if (!findings.length) findings.push({ level: "ok", title: "Baseline HA checks passed", detail: "Before production, validate capacity, backup restoration, and failover scenarios." });
-    return { total, spCount, searchCount, score, vcpu, ram, findings };
+    return {
+      total, spCount, searchCount, score, vcpu, ram, findings,
+      recommendedPartitionCount, indexPartitionCount, indexReplicaCount, indexComponentCount,
+      indexHostCount, indexHostSlotCount, nonCrawlSearchComponentCount,
+      partitionSizingReady, indexCapacityReady, replicaFaultDomainsReady, searchExportReady,
+    };
   }, [config]);
 
   const exportDesign = () => {
-    const payload = { title: "SharePoint Farm Architecture Design", generatedAt: new Date().toISOString(), assumptions: { users: config.users, contentTb: config.contentTb, highAvailability: config.ha }, configuration: config, sizingDraft: { totalServers: metrics.total, estimatedVcpu: metrics.vcpu, estimatedRamGb: metrics.ram }, notes: metrics.findings };
+    const payload = {
+      title: "SharePoint Farm Architecture Design",
+      generatedAt: new Date().toISOString(),
+      assumptions: { users: config.users, contentTb: config.contentTb, expectedIndexedItemsMillions: config.expectedIndexedItemsMillions, highAvailability: config.ha },
+      configuration: config,
+      searchIndexDesign: config.search ? { partitions: metrics.indexPartitionCount, replicasPerPartition: metrics.indexReplicaCount, indexComponents: metrics.indexComponentCount, plannedIndexHosts: metrics.indexHostCount } : null,
+      sizingDraft: { totalServers: metrics.total, estimatedVcpu: metrics.vcpu, estimatedRamGb: metrics.ram },
+      notes: metrics.findings,
+    };
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
     const anchor = document.createElement("a"); anchor.href = url; anchor.download = "sharepoint-farm-architecture.json"; anchor.click(); URL.revokeObjectURL(url);
   };
@@ -374,6 +507,11 @@ export default function Home() {
   const exportSearchPowerShell = () => {
     if (!config.search) {
       setNotice({ kind: "warning", title: "Search configuration is disabled", detail: "Enable Search Service Application under Goals and services before exporting the script." });
+      return;
+    }
+
+    if (!metrics.searchExportReady) {
+      setNotice({ kind: "warning", title: "Resolve the Search index design first", detail: `The selected ${metrics.indexPartitionCount} × ${metrics.indexReplicaCount} design cannot be placed safely on ${metrics.indexHostCount} real-time Search host${metrics.indexHostCount === 1 ? "" : "s"}. Review the capacity findings or use Recommend for this workload.` });
       return;
     }
 
@@ -385,15 +523,15 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `configure-sharepoint-search-${config.version}-${config.topology}-${count}-nodes.ps1`;
+    anchor.download = `configure-sharepoint-search-${config.version}-${config.topology}-${count}-nodes-${metrics.indexPartitionCount}p-${metrics.indexReplicaCount}r.ps1`;
     anchor.click();
     URL.revokeObjectURL(url);
-    setNotice({ kind: "success", title: "PowerShell script downloaded", detail: `Created guarded SSA, proxy, component placement, and validation steps for ${count} Search node(s).` });
+    setNotice({ kind: "success", title: "PowerShell script downloaded", detail: `Created ${metrics.indexPartitionCount} partition${metrics.indexPartitionCount === 1 ? "" : "s"} with ${metrics.indexReplicaCount} replica${metrics.indexReplicaCount === 1 ? "" : "s"} each across distinct Search hosts. Verify infrastructure separation before production.` });
   };
 
   const serverRows = config.topology === "shared"
-    ? [{ key: "wfe", label: "Front-end + Distributed Cache", value: config.wfe, set: (v: number) => setField("wfe", v), icon: "traffic" as IconName }, { key: "app", label: config.search ? "Application + Search" : "Application", value: config.app, set: (v: number) => setField("app", v), icon: "app" as IconName }]
-    : [{ key: "wfe", label: "Front-end", value: config.wfe, set: (v: number) => setField("wfe", v), icon: "traffic" as IconName }, { key: "cache", label: "Distributed Cache", value: config.cache, set: (v: number) => setField("cache", v), icon: "server" as IconName }, { key: "app", label: "Application", value: config.app, set: (v: number) => setField("app", v), icon: "app" as IconName }, ...(config.search ? [{ key: "search", label: "Search", value: config.searchNodes, set: (v: number) => setField("searchNodes", v), icon: "search" as IconName }] : [])];
+    ? [{ key: "wfe", label: "Front-end + Distributed Cache", value: config.wfe, set: (v: number) => setField("wfe", v), icon: "traffic" as IconName, max: 8 }, { key: "app", label: config.search ? "Application + Search" : "Application", value: config.app, set: (v: number) => setField("app", v), icon: "app" as IconName, max: 8 }]
+    : [{ key: "wfe", label: "Front-end", value: config.wfe, set: (v: number) => setField("wfe", v), icon: "traffic" as IconName, max: 8 }, { key: "cache", label: "Distributed Cache", value: config.cache, set: (v: number) => setField("cache", v), icon: "server" as IconName, max: 8 }, { key: "app", label: "Application", value: config.app, set: (v: number) => setField("app", v), icon: "app" as IconName, max: 8 }, ...(config.search ? [{ key: "search", label: "Search", value: config.searchNodes, set: (v: number) => setField("searchNodes", v), icon: "search" as IconName, max: 16 }] : [])];
 
   return <main className="site-shell">
     <header className="topbar">
@@ -433,15 +571,26 @@ export default function Home() {
           <label className="range-field"><div><span><Icon name="database" size={16} /> Content volume</span><strong>{config.contentTb.toLocaleString("en-US")} TB</strong></div><input type="range" min="0.25" max="25" step="0.25" value={config.contentTb} style={{ background: `linear-gradient(90deg,#2879e2 ${((config.contentTb - .25) / 24.75) * 100}%,#dfe6ee 0)` }} onChange={(e) => setField("contentTb", Number(e.target.value))} /><small><span>0.25 TB</span><span>25 TB</span></small></label>
           <button type="button" className="recommend-button" onClick={applyRecommended}><span className="spark">✦</span> Recommend for this workload</button>
         </div>
+        {config.search && <div className="control-section compact-section search-index-section">
+          <div className="section-caption"><span>Search index design</span><small>Capacity-aware</small></div>
+          <label className="range-field"><div><span><Icon name="search" size={16} /> Expected indexed items</span><strong>{config.expectedIndexedItemsMillions.toLocaleString("en-US")}M</strong></div><input type="range" min="0.5" max="500" step="0.5" value={config.expectedIndexedItemsMillions} style={{ background: `linear-gradient(90deg,#0d8f79 ${((config.expectedIndexedItemsMillions - .5) / 499.5) * 100}%,#dfe6ee 0)` }} onChange={(e) => setField("expectedIndexedItemsMillions", Number(e.target.value))} /><small><span>0.5 million</span><span>500 million</span></small></label>
+          <div className="segmented-control search-mode-control" role="group" aria-label="Index partition sizing mode"><button type="button" className={config.indexPartitionMode === "auto" ? "is-selected" : ""} onClick={() => setField("indexPartitionMode", "auto")}>Automatic</button><button type="button" className={config.indexPartitionMode === "manual" ? "is-selected" : ""} onClick={() => { setConfig((current) => ({ ...current, indexPartitionMode: "manual", indexPartitions: selectedIndexPartitions(current) })); setActivePreset("custom"); }}>Manual override</button></div>
+          <div className="search-sizing-rows">
+            <div className="search-sizing-row"><span><strong>Index partitions</strong><small>Baseline: one per 20M items</small></span>{config.indexPartitionMode === "auto" ? <span className="calculated-value" aria-label={`${metrics.indexPartitionCount} calculated index partitions`}>{metrics.indexPartitionCount}<small>calculated</small></span> : <Stepper value={config.indexPartitions} min={1} max={MAX_INDEX_PARTITIONS} onChange={(value) => setField("indexPartitions", value)} label="Index partitions" />}</div>
+            <div className="search-sizing-row"><span><strong>Replicas per partition</strong><small>Use two or more for HA</small></span><Stepper value={config.indexReplicas} min={1} max={MAX_INDEX_REPLICAS} onChange={(value) => setField("indexReplicas", value)} label="Index replicas per partition" /></div>
+          </div>
+          <div className={`search-capacity-card ${metrics.searchExportReady ? "is-ready" : "has-warning"}`}><span><strong>{metrics.indexPartitionCount} × {metrics.indexReplicaCount} = {metrics.indexComponentCount}</strong><small>index components</small></span><span><strong>{metrics.indexHostCount} hosts / {metrics.indexHostSlotCount} slots</strong><small>real-time placement capacity</small></span></div>
+          <p className="search-guidance">The script places replicas of the same partition on distinct Search servers. SharePoint does not label or track fault domains; verify separate hosts, racks, storage or power groups, or availability zones with the infrastructure team.</p>
+        </div>}
         <div className="control-section compact-section">
           <div className="section-caption"><span>MinRole model</span><small>Service placement</small></div>
           <div className="segmented-control" role="group" aria-label="MinRole model"><button type="button" className={config.topology === "shared" ? "is-selected" : ""} onClick={() => setField("topology", "shared")}>Shared</button><button type="button" className={config.topology === "dedicated" ? "is-selected" : ""} onClick={() => setField("topology", "dedicated")}>Dedicated</button></div>
           <p className="helper-copy">{config.topology === "shared" ? "WFE + Cache and Application + Search roles run on the same servers." : "Each MinRole function scales in an independent server group."}</p>
         </div>
         <div className="control-section compact-section">
-          <div className="section-caption"><span>Server roles</span><small>1–8 nodes</small></div>
+          <div className="section-caption"><span>Server roles</span><small>Up to 16 Search nodes</small></div>
           <div className="role-controls">
-            {serverRows.map((row) => <div className="role-control" key={row.key}><span className={`role-symbol role-${row.key}`}><Icon name={row.icon} size={16} /></span><span className="role-label">{row.label}</span><Stepper value={row.value} min={1} onChange={row.set} label={row.label} /></div>)}
+            {serverRows.map((row) => <div className="role-control" key={row.key}><span className={`role-symbol role-${row.key}`}><Icon name={row.icon} size={16} /></span><span className="role-label">{row.label}</span><Stepper value={row.value} min={1} max={row.max} onChange={row.set} label={row.label} /></div>)}
             <div className="role-control"><span className="role-symbol role-sql"><Icon name="database" size={16} /></span><span className="role-label">SQL Server</span><Stepper value={config.sql} min={1} max={4} onChange={(v) => setField("sql", v)} label="SQL Server" /></div>
             {config.oos && <div className="role-control"><span className="role-symbol role-oos"><Icon name="server" size={16} /></span><span className="role-label">Office Online</span><Stepper value={config.oosNodes} min={1} max={4} onChange={(v) => setField("oosNodes", v)} label="Office Online" /></div>}
             {config.workflow && <div className="role-control"><span className="role-symbol role-workflow"><Icon name="app" size={16} /></span><span className="role-label">Workflow Manager</span><Stepper value={config.workflowNodes} min={1} max={5} onChange={(v) => setField("workflowNodes", v)} label="Workflow Manager" /></div>}
@@ -451,7 +600,7 @@ export default function Home() {
           <div className="section-caption"><span>Goals and services</span><small>Optional</small></div>
           <div className="switch-list">
             <div className="switch-row"><span><strong>High availability</strong><small>N+1 per role</small></span><Switch checked={config.ha} onChange={(v) => setField("ha", v)} label="High availability" /></div>
-            <div className="switch-row"><span><strong>Two fault domains</strong><small>Host / rack separation</small></span><Switch checked={config.faultDomains} onChange={(v) => setField("faultDomains", v)} label="Two fault domains" /></div>
+            <div className="switch-row"><span><strong>Infrastructure separation</strong><small>Planning only—no SharePoint setting</small></span><Switch checked={config.faultDomains} onChange={(v) => setField("faultDomains", v)} label="Separate infrastructure failure groups" /></div>
             <div className="switch-row"><span><strong>Search Service Application</strong><small>Enterprise search</small></span><Switch checked={config.search} onChange={(v) => { setField("search", v); setConfig((c) => ({ ...c, search: v, searchNodes: v ? Math.max(c.searchNodes, c.ha ? 2 : 1) : 0 })); }} label="Search Service Application" /></div>
             <div className="switch-row"><span><strong>Office Online Server</strong><small>In-browser document viewing</small></span><Switch checked={config.oos} onChange={(v) => { setField("oos", v); setConfig((c) => ({ ...c, oos: v, oosNodes: v ? (c.ha ? 2 : 1) : 0 })); }} label="Office Online Server" /></div>
             <div className="switch-row"><span><strong>Workflow Manager</strong><small>SharePoint 2013 workflows</small></span><Switch checked={config.workflow} onChange={(v) => { setField("workflow", v); setConfig((c) => ({ ...c, workflow: v, workflowNodes: v ? (c.ha ? 3 : 1) : 0 })); }} label="Workflow Manager" /></div>
@@ -463,8 +612,8 @@ export default function Home() {
       <section className="center-column">
         <div className="summary-cards">
           <article><span className="summary-icon blue"><Icon name="server" size={18} /></span><div><small>Total servers</small><strong>{metrics.total}</strong></div><em>{metrics.spCount} SharePoint</em></article>
-          <article><span className="summary-icon violet"><Icon name="shield" size={18} /></span><div><small>Availability</small><strong>{config.ha ? "N+1" : "Standard"}</strong></div><em>{config.faultDomains ? "2 fault domains" : "Single fault domain"}</em></article>
-          <article><span className="summary-icon teal"><Icon name="search" size={18} /></span><div><small>Search</small><strong>{config.search ? `${metrics.searchCount} node${metrics.searchCount === 1 ? "" : "s"}` : "Off"}</strong></div><em>{config.search && metrics.searchCount >= 2 ? "Redundant" : "Single instance"}</em></article>
+          <article><span className="summary-icon violet"><Icon name="shield" size={18} /></span><div><small>Availability</small><strong>{config.ha ? "N+1" : "Standard"}</strong></div><em>{config.faultDomains ? "Infrastructure separated" : "Single failure group"}</em></article>
+          <article><span className="summary-icon teal"><Icon name="search" size={18} /></span><div><small>Search</small><strong>{config.search ? `${metrics.searchCount} node${metrics.searchCount === 1 ? "" : "s"}` : "Off"}</strong></div><em title={config.search ? `${metrics.indexPartitionCount} partition${metrics.indexPartitionCount === 1 ? "" : "s"}, ${metrics.indexReplicaCount} replica${metrics.indexReplicaCount === 1 ? "" : "s"} per partition` : undefined}>{config.search ? `${metrics.indexPartitionCount}P · ${metrics.indexReplicaCount}R` : "Disabled"}</em></article>
         </div>
         <section className="architecture-card">
           <div className="architecture-toolbar"><div><span>02</span><div><p>Live topology</p><h2>Farm architecture</h2></div></div><div className="toolbar-badges"><span>{config.version === "se" ? "Subscription Edition" : `Server ${config.version}`}</span><span>{config.topology === "shared" ? "Shared MinRole" : "Dedicated MinRole"}</span></div></div>
@@ -473,7 +622,7 @@ export default function Home() {
             <div className="vertical-connector"><span /></div>
             <div className="flow-stage farm-stage">
               <div className="stage-label"><span>02</span><p>SHAREPOINT FARM</p></div>
-              <div className="farm-meta"><span className="farm-health-dot" /><strong>Farm online</strong><small>{config.faultDomains ? "FD-A + FD-B" : "Single fault domain"}</small></div>
+              <div className="farm-meta"><span className="farm-health-dot" /><strong>Farm online</strong><small>{config.faultDomains ? "Separate failure groups" : "Single failure group"}</small></div>
               <div className={`farm-groups ${config.topology}`}>
                 {config.topology === "shared" ? <>
                   <NodeGroup eyebrow="WEB TIER" title="Front-end + Cache">{Array.from({ length: config.wfe }).map((_, index) => <ServerCard key={`wfe-${index}`} type="wfe" combinedWith="cache" index={index} faultDomains={config.faultDomains} />)}</NodeGroup>
@@ -488,7 +637,7 @@ export default function Home() {
             </div>
             <div className="vertical-connector split"><span /></div>
             <div className="lower-tier-grid">
-              <div className="flow-stage data-stage"><div className="stage-label"><span>03</span><p>DATA TIER</p></div><div className="data-content"><div className="sql-cluster">{Array.from({ length: config.sql }).map((_, index) => <div className="sql-node" key={`sql-${index}`}><span className="sql-cylinder"><Icon name="database" size={18} /></span><span><strong>SQL-{String(index + 1).padStart(2, "0")}</strong><small>{index === 0 ? "Primary replica" : "Synchronous replica"}</small></span><em>{config.faultDomains ? (index % 2 === 0 ? "FD-A" : "FD-B") : "LOCAL"}</em></div>)}</div><div className="ag-label"><span className={config.sql >= 2 ? "ready" : ""}><Icon name={config.sql >= 2 ? "check" : "alert"} size={13} /></span><div><strong>{config.sql >= 2 ? "Always On AG" : "Single SQL instance"}</strong><small>{config.sql >= 2 ? "Synchronous commit + listener" : "Add a replica for production HA"}</small></div></div></div></div>
+              <div className="flow-stage data-stage"><div className="stage-label"><span>03</span><p>DATA TIER</p></div><div className="data-content"><div className="sql-cluster">{Array.from({ length: config.sql }).map((_, index) => <div className="sql-node" key={`sql-${index}`}><span className="sql-cylinder"><Icon name="database" size={18} /></span><span><strong>SQL-{String(index + 1).padStart(2, "0")}</strong><small>{index === 0 ? "Primary replica" : "Synchronous replica"}</small></span><em title="Infrastructure planning label only; not a SharePoint setting.">{config.faultDomains ? (index % 2 === 0 ? "GROUP 1" : "GROUP 2") : "SINGLE GROUP"}</em></div>)}</div><div className="ag-label"><span className={config.sql >= 2 ? "ready" : ""}><Icon name={config.sql >= 2 ? "check" : "alert"} size={13} /></span><div><strong>{config.sql >= 2 ? "Always On AG" : "Single SQL instance"}</strong><small>{config.sql >= 2 ? "Synchronous commit + listener" : "Add a replica for production HA"}</small></div></div></div></div>
               <div className="flow-stage services-stage"><div className="stage-label"><span>04</span><p>CONNECTED SERVICES</p></div><div className="service-chips">{config.oos && <div><span className="service-chip-icon rose"><Icon name="server" size={16} /></span><span><strong>Office Online</strong><small>{config.oosNodes} node{config.oosNodes === 1 ? "" : "s"}</small></span></div>}{config.workflow && <div><span className="service-chip-icon slate"><Icon name="app" size={16} /></span><span><strong>Workflow Manager</strong><small>{config.workflowNodes} node{config.workflowNodes === 1 ? "" : "s"}</small></span></div>}{config.dr && <div><span className="service-chip-icon blue"><Icon name="shield" size={16} /></span><span><strong>DR site</strong><small>Asynchronous replica</small></span></div>}{!config.oos && !config.workflow && !config.dr && <div className="empty-services"><Icon name="info" size={16} /><span>No connected services selected</span></div>}</div></div>
             </div>
           </div>
@@ -501,8 +650,8 @@ export default function Home() {
         <section className="score-section"><div className="score-ring" style={{ "--score": `${metrics.score * 3.6}deg` } as React.CSSProperties}><div><strong>{metrics.score}</strong><span>/ 100</span></div></div><div className="score-copy"><span>Architecture health score</span><strong>{metrics.score === 100 ? "Baseline checks complete" : metrics.score >= 60 ? "Good, with a few gaps" : "Critical gaps found"}</strong><small>Based on HA, role redundancy, and fault-domain separation</small></div></section>
         <section className="analysis-section"><div className="section-caption"><span>Review findings</span><small>{metrics.findings.length} {metrics.findings.length === 1 ? "finding" : "findings"}</small></div><div className="finding-list">{metrics.findings.map((finding, index) => <article key={`${finding.title}-${index}`} className={`finding ${finding.level}`}><span><Icon name={finding.level === "warning" ? "alert" : finding.level === "ok" ? "check" : "info"} size={15} /></span><div><strong>{finding.title}</strong><p>{finding.detail}</p></div></article>)}</div></section>
         <section className="analysis-section sizing-section"><div className="section-caption"><span>Resource summary</span><small>Draft sizing</small></div><div className="sizing-grid"><div><span>Servers</span><strong>{metrics.total}</strong><small>total nodes</small></div><div><span>vCPU</span><strong>{metrics.vcpu}</strong><small>estimated total</small></div><div><span>Memory</span><strong>{metrics.ram}</strong><small>GB RAM</small></div><div><span>Content</span><strong>{config.contentTb}</strong><small>TB of data</small></div></div></section>
-        <section className="analysis-section decision-section"><div className="section-caption"><span>Decision summary</span><small>Current selection</small></div><dl><div><dt>Version</dt><dd>{config.version === "se" ? "Subscription Edition" : `Server ${config.version}`}</dd></div><div><dt>Topology</dt><dd>{config.topology === "shared" ? "Shared MinRole" : "Dedicated MinRole"}</dd></div><div><dt>HA target</dt><dd>{config.ha ? "Enabled" : "Not enabled"}</dd></div><div><dt>Fault domains</dt><dd>{config.faultDomains ? "2 domains" : "Single domain"}</dd></div><div><dt>DR</dt><dd>{config.dr ? "Planned" : "Out of scope"}</dd></div></dl></section>
-        <section className={`ps-export-card ${config.search ? "" : "is-disabled"}`}><span><Icon name="code" size={18} /></span><div><div className="ps-card-heading"><strong>Search PowerShell</strong><em>{config.search ? `${metrics.searchCount} node${metrics.searchCount === 1 ? "" : "s"}` : "Disabled"}</em></div><p>Generates a `.ps1` file with guarded pre-checks, SSA/proxy provisioning, Search component placement, and validation for the selected topology.</p><button type="button" onClick={exportSearchPowerShell} disabled={!config.search}><Icon name="download" size={14} /> Download script</button></div></section>
+        <section className="analysis-section decision-section"><div className="section-caption"><span>Decision summary</span><small>Current selection</small></div><dl><div><dt>Version</dt><dd>{config.version === "se" ? "Subscription Edition" : `Server ${config.version}`}</dd></div><div><dt>Topology</dt><dd>{config.topology === "shared" ? "Shared MinRole" : "Dedicated MinRole"}</dd></div><div><dt>Indexed items</dt><dd>{config.expectedIndexedItemsMillions.toLocaleString("en-US")} million</dd></div><div><dt>Index topology</dt><dd>{config.search ? `${metrics.indexPartitionCount} partitions × ${metrics.indexReplicaCount} replicas` : "Disabled"}</dd></div><div><dt>HA target</dt><dd>{config.ha ? "Enabled" : "Not enabled"}</dd></div><div><dt>Infrastructure separation</dt><dd>{config.faultDomains ? "Planned" : "Not planned"}</dd></div><div><dt>DR</dt><dd>{config.dr ? "Planned" : "Out of scope"}</dd></div></dl></section>
+        <section className={`ps-export-card ${config.search ? (metrics.searchExportReady ? "" : "has-warning") : "is-disabled"}`}><span><Icon name="code" size={18} /></span><div><div className="ps-card-heading"><strong>Search PowerShell</strong><em>{config.search ? `${metrics.indexPartitionCount}P × ${metrics.indexReplicaCount}R` : "Disabled"}</em></div><p>Generates a guarded `.ps1` file with capacity checks, equal replicas for every partition on distinct Search hosts, SSA/proxy provisioning, and final validation. Infrastructure separation remains an administrator responsibility.</p><button type="button" onClick={exportSearchPowerShell} disabled={!config.search}><Icon name="download" size={14} /> Download script</button></div></section>
         <section className="sources-card"><span><Icon name="shield" size={17} /></span><div><strong>Aligned with Microsoft guidance</strong><p>MinRole, high availability, and Search redundancy checks are based on official planning principles.</p><a href="https://learn.microsoft.com/sharepoint/install/planning-for-a-minrole-server-deployment-in-sharepoint-server" target="_blank" rel="noreferrer">Open planning guide <Icon name="chevron" size={13} /></a></div></section>
       </aside>
     </div>
