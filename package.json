@@ -1,6 +1,6 @@
 {
-  "name": "sharepoint-farm-designer-iis",
-  "version": "1.0.0",
+  "name": "sharepoint-farm-architecture-designer",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "engines": {
