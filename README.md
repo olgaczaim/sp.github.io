@@ -22,27 +22,3 @@ npm run build
 ```
 
 The production-ready static files are created in `dist/`.
-
-## Publish with GitHub Pages
-
-The repository contains `.github/workflows/deploy-pages.yml`. It builds and deploys the application whenever the `main` branch changes.
-
-This is a Vite/React application. Do not use GitHub's Jekyll workflow and do not configure Pages to deploy the repository root directly. The workflow must build the application and publish the generated `dist/` directory.
-
-1. Open the repository on GitHub.
-2. Go to **Settings > Pages**.
-3. Under **Build and deployment**, set **Source** to **GitHub Actions**.
-4. Push a commit to `main`, or run the workflow manually from **Actions > Deploy website to GitHub Pages > Run workflow**.
-5. After the workflow succeeds, open the URL shown in the deployment job or in **Settings > Pages**.
-
-For a project repository, the default URL is:
-
-```text
-https://YOUR-GITHUB-USERNAME.github.io/YOUR-REPOSITORY-NAME/
-```
-
-The Vite configuration uses relative asset paths, so the site works under both a repository subpath and a custom domain.
-
-## Important publication note
-
-GitHub Pages is a public website. Review the source and generated PowerShell before publishing, and do not commit passwords, tokens, production server names, internal DNS names, or other confidential environment details.
